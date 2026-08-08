@@ -257,6 +257,14 @@ export function totalReceivable(ledgerEntries){
   const map=partyBalances(ledgerEntries);
   return Object.values(map).reduce((s,b)=>s+Math.max(0,b.gave-b.got),0);
 }
+// How much of THIS order has already been paid — a regular customer paying
+// half on the spot and the rest later means more than one "got" entry can
+// link back to the same order.
+export function amountPaidForOrder(ledgerEntries,orderId){
+  return (ledgerEntries||[])
+    .filter(e=>e.linked_order_id===orderId&&e.entry_type==="got")
+    .reduce((s,e)=>s+e.amount,0);
+}
 
 // Ages each customer's still-unpaid "gave" (debit) entries against their total
 // payments, oldest debit first — the standard FIFO assumption real AR aging
@@ -932,12 +940,20 @@ function OrderForm({initial,inventory,onSave,onClose,savedCustomers,onSaveCustom
 }
 
 // ─── ORDER CARD ───────────────────────────────────────────────────────────────
-function OrderCard({order,inventory,onView,onEdit,onDelete,onUpdateStatus,onPrint,userRole,onMarkPaid}){
+function OrderCard({order,inventory,onView,onEdit,onDelete,onUpdateStatus,onPrint,userRole,onMarkPaid,ledgerEntries,onRecordPayment}){
   const isDelivered=order.status==="Delivered";
   const total=orderTotal(order,inventory);
   const isCash=order.is_cash;
   const isPaid=order.is_paid;
   const [showPayModal,setShowPayModal]=useState(false);
+
+  // Regular (credit) customers settle through the ledger, not the is_paid flag —
+  // a customer can pay part of a bill on the spot and owe the rest, so this
+  // tracks how much of THIS order's total has actually been collected so far.
+  const paidSoFar=isCash?0:amountPaidForOrder(ledgerEntries,order.id);
+  const remaining=Math.max(0,total-paidSoFar);
+  const [showRecordPayment,setShowRecordPayment]=useState(false);
+  const [payAmount,setPayAmount]=useState("");
 
   return <div style={{background:T.paperWhite,border:`1px solid ${T.line}`,borderLeft:`3px solid ${isCash?(isPaid?"#5C8A3D":T.gold):STATUS_CFG[order.status]?.dot||T.sage}`,borderRadius:3,padding:"14px 16px",fontFamily:FB}}>
     <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,gap:10,flexWrap:"wrap"}}>
@@ -947,6 +963,9 @@ function OrderCard({order,inventory,onView,onEdit,onDelete,onUpdateStatus,onPrin
           <Badge status={order.status}/>
           {isCash&&<span style={{fontSize:10,fontFamily:FM,fontWeight:700,color:isPaid?"#5C8A3D":T.clay,background:isPaid?"#E1EAD6":"#FCF2EC",padding:"2px 8px",borderRadius:2,textTransform:"uppercase",letterSpacing:"0.04em"}}>
             {isPaid?"PAID":"UNPAID"}
+          </span>}
+          {!isCash&&isDelivered&&paidSoFar>0&&<span style={{fontSize:10,fontFamily:FM,fontWeight:700,color:remaining>0.5?T.gold:"#5C8A3D",background:remaining>0.5?"#FBF6E9":"#E1EAD6",padding:"2px 8px",borderRadius:2,textTransform:"uppercase",letterSpacing:"0.04em"}}>
+            {remaining>0.5?`${fmtMoney(paidSoFar)} PAID`:"PAID IN FULL"}
           </span>}
         </div>
         <div style={{fontFamily:FD,fontSize:18,fontWeight:700,color:T.ink,wordBreak:"break-word"}}>{order.customer||"–"}</div>
@@ -975,6 +994,7 @@ function OrderCard({order,inventory,onView,onEdit,onDelete,onUpdateStatus,onPrin
         Delivered
       </label>
       {isCash&&!isPaid&&<button onClick={()=>setShowPayModal(true)} style={{...BTN(),padding:"7px 12px",background:T.gold,color:T.paperWhite,fontSize:12,fontWeight:700}}>Mark Paid</button>}
+      {!isCash&&isDelivered&&remaining>0.5&&<button onClick={()=>{setPayAmount(String(remaining));setShowRecordPayment(true);}} style={{...BTN(),padding:"7px 12px",background:T.gold,color:T.paperWhite,fontSize:12,fontWeight:700}}>Record payment</button>}
       <button onClick={()=>onView(order)} style={{...BTN(),flex:"1 0 70px",padding:"7px 0",background:"transparent",border:`1px solid ${T.line}`,color:T.ink,fontSize:12}}>View</button>
       <button onClick={()=>onEdit(order)} style={{...BTN(),flex:"1 0 70px",padding:"7px 0",background:"transparent",border:`1px solid ${T.line}`,color:T.ink,fontSize:12}}>Edit</button>
       {userRole==="admin"&&<button onClick={()=>onPrint(order)} style={{...BTN(),flex:"1 0 70px",padding:"7px 0",background:"transparent",border:`1px solid ${T.line}`,color:T.inkMuted,fontSize:12}}>Print</button>}
@@ -990,6 +1010,25 @@ function OrderCard({order,inventory,onView,onEdit,onDelete,onUpdateStatus,onPrin
           <button onClick={()=>{onMarkPaid&&onMarkPaid(order.id,"paytm");setShowPayModal(false);}} style={{...BTN(),padding:"13px 0",background:"#0a4a9a",color:T.paperWhite,fontSize:14,fontWeight:700}}>📱 Paytm</button>
         </div>
         <button onClick={()=>setShowPayModal(false)} style={{width:"100%",marginTop:12,padding:"10px",background:"none",border:`1px solid ${T.line}`,borderRadius:3,cursor:"pointer",fontSize:12,color:T.inkMuted,fontFamily:FB}}>Cancel</button>
+      </div>
+    </div>}
+
+    {showRecordPayment&&<div onClick={()=>setShowRecordPayment(false)} style={{position:"fixed",inset:0,background:"rgba(28,30,23,0.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000,padding:16}}>
+      <div onClick={e=>e.stopPropagation()} style={{background:T.paperWhite,borderRadius:4,padding:28,width:340,border:`1px solid ${T.line}`,boxShadow:"0 20px 60px rgba(0,0,0,0.3)"}}>
+        <div style={{fontFamily:FD,fontWeight:700,fontSize:18,marginBottom:6}}>Record payment</div>
+        <div style={{fontSize:13,color:T.inkMuted,marginBottom:16}}>
+          {order.customer} — bill {fmtMoney(total)}{paidSoFar>0?`, already paid ${fmtMoney(paidSoFar)}`:""}
+        </div>
+        <label style={IL}>Amount received now (₹)</label>
+        <input type="number" autoFocus value={payAmount} onChange={e=>setPayAmount(e.target.value)} style={{...II,marginBottom:6,fontFamily:FM}}/>
+        <div style={{fontSize:11,color:T.inkMuted,marginBottom:16}}>
+          Enter less than {fmtMoney(remaining)} for a partial payment — the rest stays outstanding in Accounts.
+        </div>
+        <div style={{display:"grid",gap:10}}>
+          <button onClick={()=>{const amt=parseFloat(payAmount)||0;if(amt<=0)return;onRecordPayment&&onRecordPayment(order,amt,"cash");setShowRecordPayment(false);}} disabled={!(parseFloat(payAmount)>0)} style={{...BTN(),padding:"13px 0",background:T.moss,color:T.paperWhite,fontSize:14,fontWeight:700}}>💵 Cash</button>
+          <button onClick={()=>{const amt=parseFloat(payAmount)||0;if(amt<=0)return;onRecordPayment&&onRecordPayment(order,amt,"paytm");setShowRecordPayment(false);}} disabled={!(parseFloat(payAmount)>0)} style={{...BTN(),padding:"13px 0",background:"#0a4a9a",color:T.paperWhite,fontSize:14,fontWeight:700}}>📱 Paytm</button>
+        </div>
+        <button onClick={()=>setShowRecordPayment(false)} style={{width:"100%",marginTop:12,padding:"10px",background:"none",border:`1px solid ${T.line}`,borderRadius:3,cursor:"pointer",fontSize:12,color:T.inkMuted,fontFamily:FB}}>Cancel</button>
       </div>
     </div>}
   </div>;
@@ -1397,7 +1436,7 @@ function PackingListView({orders,onlyDate,onUpdateActualQty,inventory}){
 }
 
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
-function Dashboard({orders,inventory,onUpdateStatus,onView,onEdit,onDelete,onPrint,onNew,userRole,onUpdateActualQty,onMarkPaid,ledgerEntries}){
+function Dashboard({orders,inventory,onUpdateStatus,onView,onEdit,onDelete,onPrint,onNew,userRole,onUpdateActualQty,onMarkPaid,ledgerEntries,onRecordPayment}){
   const [search,setSearch]=useState("");
   const [filterStatus,setFilterStatus]=useState("All");
   const [filterDate,setFilterDate]=useState("");
@@ -1510,7 +1549,7 @@ function Dashboard({orders,inventory,onUpdateStatus,onView,onEdit,onDelete,onPri
               </button>
             </div>
             <div style={{display:"grid",gap:10}}>
-              {filtered.filter(o=>orderSection==="cash"?o.is_cash:!o.is_cash).map(o=><OrderCard key={o.id} order={o} inventory={inventory} onView={onView} onEdit={onEdit} onDelete={onDelete} onUpdateStatus={onUpdateStatus} onPrint={onPrint} userRole={userRole} onMarkPaid={onMarkPaid}/>)}
+              {filtered.filter(o=>orderSection==="cash"?o.is_cash:!o.is_cash).map(o=><OrderCard key={o.id} order={o} inventory={inventory} onView={onView} onEdit={onEdit} onDelete={onDelete} onUpdateStatus={onUpdateStatus} onPrint={onPrint} userRole={userRole} onMarkPaid={onMarkPaid} ledgerEntries={ledgerEntries} onRecordPayment={onRecordPayment}/>)}
               {filtered.filter(o=>orderSection==="cash"?o.is_cash:!o.is_cash).length===0&&
                 <div style={{textAlign:"center",padding:30,color:T.inkMuted,fontStyle:"italic",fontFamily:FD}}>
                   No {orderSection==="cash"?"cash/walk-in":"regular"} orders.
@@ -4315,6 +4354,25 @@ export default function App(){
     showToast(`Payment recorded — ${method==="cash"?"Cash":"Paytm"}`);
   }
 
+  // Regular (credit) customers can pay part of a bill on the spot — this
+  // records just that amount against the order, leaving the rest as a normal
+  // outstanding balance in Accounts instead of needing a separate manual entry.
+  async function handleRecordPayment(order,amount,method){
+    const total=orderTotal(order,inventory);
+    const paidSoFar=amountPaidForOrder(ledgerEntries,order.id);
+    const isPartial=paidSoFar+amount<total-0.5;
+    await supabase.from("ledger_entries").insert([{
+      party_name:order.customer,party_type:"customer",entry_type:"got",
+      amount,date:today(),
+      notes:`${method==="cash"?"Cash":"Paytm"} payment${isPartial?" (partial)":""} — Order ${order.id}`,
+      linked_order_id:order.id,
+    }]);
+    fetchLedger();
+    showToast(isPartial
+      ?`₹${amount.toLocaleString("en-IN")} recorded — ₹${(total-paidSoFar-amount).toLocaleString("en-IN")} still owed`
+      :"Payment recorded in full");
+  }
+
   async function handleDelete(id){
     if(!window.confirm("Delete this order permanently?"))return;
     const order=orders.find(o=>o.id===id);
@@ -4526,7 +4584,7 @@ export default function App(){
             .eq("entry_type","gave");
           fetchLedger();
         }
-      }} onMarkPaid={handleMarkPaid} ledgerEntries={ledgerEntries}/>}
+      }} onMarkPaid={handleMarkPaid} ledgerEntries={ledgerEntries} onRecordPayment={handleRecordPayment}/>}
       {tab==="inventory"&&isAdmin&&<InventoryPanel inventory={inventory} onUpdate={setInventory} customers={allCustomerNames} user={user}/>}
       {tab==="purchases"&&isAdmin&&<Purchases inventory={inventory} onInventoryUpdate={setInventory} onPurchaseSaved={recordPurchaseLedgerEntry} savedVendors={savedVendors} onSaveVendor={addSavedVendor}/>}
       {tab==="accounts"&&isAdmin&&<AccountsPanel ledgerEntries={ledgerEntries} onAddEntry={addManualLedgerEntry} onDeleteEntry={deleteLedgerEntry} onEditEntry={editLedgerEntry} savedCustomers={savedCustomers} purchaseVendors={savedVendors.map(v=>v.name)} orders={orders} onDeleteOrder={handleDelete} inventory={inventory} onSaveCustomer={addSavedCustomer} user={user}/>}
