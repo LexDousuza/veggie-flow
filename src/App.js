@@ -52,6 +52,7 @@ const DEFAULT_ITEMS = [
   "Romaine Green Lettuce","Rosemary Fresh","Thai Chilli","Thai Ginger / Galangal","Thyme Fresh",
   "Tomato Cherry","Green Zucchini","Yellow Zucchini","Zucchini Mix","Peeled Garlic","Sweet Corn Frozen","Green Peas Frozen",
 ];
+const EXPENSE_CATEGORIES = ["Rent","Electricity","Fuel / Diesel","Staff Wages","Packaging","Transport","Maintenance","Other"];
 
 const DEFAULT_RATES = {
   "American Kale":120,"Arugula / Rocket Lettuce":180,"Asparagus Imported":750,"Baby Corn":150,"Baby Spinach":70,
@@ -232,6 +233,58 @@ export function orderTotal(order,inventory){
   // and calcAmountDisplay so _mixed items sum Red+Yellow separately.
   const raw=mergeItemsForDisplay(order.items||[]).reduce((s,it)=>s+calcAmountDisplay(it,inventory,order.customer),0);
   return Math.round(raw); // round off to nearest rupee — no paise in cash billing
+}
+
+// ─── ACCOUNTING HELPERS (shared across order intake, dashboard, accounts) ─────
+// Same gave/got math AccountsPanel uses for its balances, factored out so any
+// screen can show "does this customer currently owe money" live instead of
+// only inside the Accounts tab.
+export function partyBalances(ledgerEntries){
+  const map={};
+  (ledgerEntries||[]).forEach(e=>{
+    if(!map[e.party_name])map[e.party_name]={gave:0,got:0};
+    if(e.entry_type==="gave")map[e.party_name].gave+=e.amount;
+    else map[e.party_name].got+=e.amount;
+  });
+  return map;
+}
+export function customerBalance(ledgerEntries,customerName){
+  if(!customerName)return 0;
+  const b=partyBalances(ledgerEntries)[customerName];
+  return b?b.gave-b.got:0;
+}
+export function totalReceivable(ledgerEntries){
+  const map=partyBalances(ledgerEntries);
+  return Object.values(map).reduce((s,b)=>s+Math.max(0,b.gave-b.got),0);
+}
+
+// Ages each customer's still-unpaid "gave" (debit) entries against their total
+// payments, oldest debit first — the standard FIFO assumption real AR aging
+// reports use, so a report can show HOW overdue money is, not just a flat total.
+export function receivablesAging(ledgerEntries,asOfDateStr){
+  const byParty={};
+  (ledgerEntries||[]).filter(e=>e.party_type==="customer").forEach(e=>{
+    (byParty[e.party_name]=byParty[e.party_name]||[]).push(e);
+  });
+  const buckets={"0-15":0,"15-30":0,"30-60":0,"60+":0};
+  const asOf=new Date(asOfDateStr);
+  Object.values(byParty).forEach(entries=>{
+    const gaveEntries=entries.filter(e=>e.entry_type==="gave").sort((a,b)=>(a.date||"")<(b.date||"")?-1:1);
+    let gotPool=entries.filter(e=>e.entry_type==="got").reduce((s,e)=>s+e.amount,0);
+    gaveEntries.forEach(e=>{
+      let outstanding=e.amount;
+      if(gotPool>0){
+        const applied=Math.min(gotPool,outstanding);
+        outstanding-=applied;
+        gotPool-=applied;
+      }
+      if(outstanding<=0.5)return;
+      const days=Math.floor((asOf-new Date(e.date||asOfDateStr))/86400000);
+      const bucket=days<=15?"0-15":days<=30?"15-30":days<=60?"30-60":"60+";
+      buckets[bucket]+=outstanding;
+    });
+  });
+  return buckets;
 }
 
 // ─── SHARED UI ────────────────────────────────────────────────────────────────
@@ -677,7 +730,7 @@ function SearchSelect({options,value,onChange,placeholder="Search…",style={}})
   </div>;
 }
 
-function OrderForm({initial,inventory,onSave,onClose,savedCustomers,onSaveCustomer}){
+function OrderForm({initial,inventory,onSave,onClose,savedCustomers,onSaveCustomer,ledgerEntries}){
   const isEdit=!!initial?.id;
   const blankItem={name:DEFAULT_ITEMS[0],qty:"",unit:DEFAULT_UNITS[DEFAULT_ITEMS[0]]||"kg",actual_qty:""};
 
@@ -803,6 +856,14 @@ function OrderForm({initial,inventory,onSave,onClose,savedCustomers,onSaveCustom
           </select>
         </div>
       </div>
+
+      {form.customer&&(()=>{
+        const bal=customerBalance(ledgerEntries,form.customer);
+        if(Math.abs(bal)<0.5)return null;
+        return <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:16,padding:"9px 12px",borderRadius:3,background:bal>0?"#F3E3DC":"#E1EAD6",fontSize:12,color:bal>0?T.clay:"#2D6A4F",fontWeight:600}}>
+          {bal>0?`⚠ ${form.customer} currently owes ₹${Math.round(bal).toLocaleString("en-IN")}`:`${form.customer} is ₹${Math.round(Math.abs(bal)).toLocaleString("en-IN")} in credit`}
+        </div>;
+      })()}
 
       {!isEdit&&<label style={{display:"flex",alignItems:"center",gap:7,fontSize:12,color:T.inkMuted,cursor:"pointer",marginBottom:16}}>
         <input type="checkbox" checked={saveCustomer} onChange={e=>setSaveCustomer(e.target.checked)}/>
@@ -1336,7 +1397,7 @@ function PackingListView({orders,onlyDate,onUpdateActualQty,inventory}){
 }
 
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
-function Dashboard({orders,inventory,onUpdateStatus,onView,onEdit,onDelete,onPrint,onNew,userRole,onUpdateActualQty,onMarkPaid}){
+function Dashboard({orders,inventory,onUpdateStatus,onView,onEdit,onDelete,onPrint,onNew,userRole,onUpdateActualQty,onMarkPaid,ledgerEntries}){
   const [search,setSearch]=useState("");
   const [filterStatus,setFilterStatus]=useState("All");
   const [filterDate,setFilterDate]=useState("");
@@ -1368,11 +1429,17 @@ function Dashboard({orders,inventory,onUpdateStatus,onView,onEdit,onDelete,onPri
       }
     }),[orders,deferredSearch,filterStatus,filterDate,sortBy]);
 
-  const stats=useMemo(()=>[
-    ["Total",orders.length,T.moss],
-    ["Pending",orders.filter(o=>o.status==="Pending").length,T.gold],
-    ["Delivered",orders.filter(o=>o.status==="Delivered").length,"#5C8A3D"],
-  ],[orders]);
+  const stats=useMemo(()=>{
+    const base=[
+      ["Total",orders.length,T.moss],
+      ["Pending",orders.filter(o=>o.status==="Pending").length,T.gold],
+      ["Delivered",orders.filter(o=>o.status==="Delivered").length,"#5C8A3D"],
+    ];
+    // Same source of truth Accounts uses — shown here too so pending money is
+    // visible where orders are actually managed, not only behind its own tab.
+    if(userRole==="admin")base.push(["Pending dues",fmtMoney(totalReceivable(ledgerEntries)),T.clay]);
+    return base;
+  },[orders,userRole,ledgerEntries]);
 
   return <div>
     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16,flexWrap:"wrap",gap:10}}>
@@ -1458,7 +1525,7 @@ function Dashboard({orders,inventory,onUpdateStatus,onView,onEdit,onDelete,onPri
 }
 
 // ─── ORDER INTAKE (Billing Station) ──────────────────────────────────────────
-function OrderIntake({onOrderCreated,inventory,savedCustomers,onSaveCustomer}){
+function OrderIntake({onOrderCreated,inventory,savedCustomers,onSaveCustomer,ledgerEntries}){
   const [mode,setMode]=useState("manual"); // manual | ai | queue
   const blankItem={name:DEFAULT_ITEMS[0],qty:"",unit:DEFAULT_UNITS[DEFAULT_ITEMS[0]]||"kg"};
   const blankOrder={customer:"",business:"",phone:"",order_date:today(),delivery_date:"",delivery_location:"",notes:"",status:"Pending",is_cash:false,items:[{...blankItem}]};
@@ -1870,6 +1937,14 @@ function OrderIntake({onOrderCreated,inventory,savedCustomers,onSaveCustomer}){
           ))}
         </div>
 
+        {order.customer&&(()=>{
+          const bal=customerBalance(ledgerEntries,order.customer);
+          if(Math.abs(bal)<0.5)return null;
+          return <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14,padding:"9px 12px",borderRadius:3,background:bal>0?"#F3E3DC":"#E1EAD6",fontSize:12,color:bal>0?T.clay:"#2D6A4F",fontWeight:600}}>
+            {bal>0?`⚠ ${order.customer} currently owes ₹${Math.round(bal).toLocaleString("en-IN")}`:`${order.customer} is ₹${Math.round(Math.abs(bal)).toLocaleString("en-IN")} in credit`}
+          </div>;
+        })()}
+
         <div style={{display:"flex",gap:16,marginBottom:18,flexWrap:"wrap"}}>
           <label style={{display:"flex",alignItems:"center",gap:7,fontSize:12,color:T.inkMuted,cursor:"pointer"}}>
             <input type="checkbox" checked={saveCustomer} onChange={e=>setSaveCustomer(e.target.checked)}/>
@@ -2099,7 +2174,7 @@ function InventoryPanel({inventory,onUpdate,customers,user}){
 }
 
 // ─── ANALYTICS ────────────────────────────────────────────────────────────────
-function Analytics({orders,inventory}){
+function Analytics({orders,inventory,ledgerEntries}){
   const [selectedCustomer,setSelectedCustomer]=useState("");
   const [selectedMonth,setSelectedMonth]=useState(today().slice(0,7));
   const [selectedDay,setSelectedDay]=useState(today());
@@ -2145,6 +2220,13 @@ function Analytics({orders,inventory}){
   // Purchase cost this period
   const monthPurchases=useMemo(()=>purchases.filter(p=>inSelectedPeriod(p.date||"")),[purchases,rangeMode,selectedMonth,rangeFrom,rangeTo]);
   const monthPurchaseCost=useMemo(()=>monthPurchases.reduce((s,p)=>s+(p.qty||0)*(p.rate||0),0),[monthPurchases]);
+
+  // General business expenses (rent, fuel, staff…) recorded via Accounts' "+ Add
+  // expense" — folded in here so Gross profit is a real P&L, not just revenue
+  // minus vegetable purchase cost.
+  const monthExpenses=useMemo(()=>(ledgerEntries||[])
+    .filter(e=>e.party_type==="other"&&e.entry_type==="got"&&inSelectedPeriod(e.date||""))
+    .reduce((s,e)=>s+e.amount,0),[ledgerEntries,rangeMode,selectedMonth,rangeFrom,rangeTo]);
 
   const customerOrders=useMemo(()=>selectedCustomer
     ?orders.filter(o=>o.customer===selectedCustomer&&inSelectedPeriod(o.order_date||""))
@@ -2348,12 +2430,13 @@ function Analytics({orders,inventory}){
 
     {/* Monthly summary cards */}
     {(()=>{
-      const profit=monthTotal-monthPurchaseCost;
+      const profit=monthTotal-monthPurchaseCost-monthExpenses;
       const profitColor=profit>=0?"#2D6A4F":"#8A3A2D";
       const statCards=[
         ["Total revenue",fmtMoney(monthTotal),T.moss],
         ["Purchase cost",fmtMoney(monthPurchaseCost),T.clay],
-        ["Gross profit",fmtMoney(profit),profitColor],
+        ["Other expenses",fmtMoney(monthExpenses),T.clay],
+        ["Net profit",fmtMoney(profit),profitColor],
         ["Orders",String(monthOrders.length),T.gold],
         ["Customers",String([...new Set(monthOrders.map(o=>o.customer).filter(Boolean))].length),"#4A7BA6"],
       ];
@@ -3369,6 +3452,33 @@ function AccountsPanel({ledgerEntries,onAddEntry,onDeleteEntry,onEditEntry,saved
         </div>
       </div>
 
+      {/* Receivables aging — how overdue the pending total actually is, not just its size */}
+      {(()=>{
+        const aging=receivablesAging(ledgerEntries,todayStr);
+        const buckets=[["0-15","0–15 days",T.moss],["15-30","15–30 days",T.gold],["30-60","30–60 days","#B8621F"],["60+","60+ days",T.clay]];
+        const maxBucket=Math.max(1,...buckets.map(([k])=>aging[k]));
+        const isEmpty=buckets.every(([key])=>aging[key]<0.5);
+        return <div style={{background:T.paperWhite,border:`1px solid ${T.line}`,borderRadius:3,padding:18,marginBottom:24}}>
+          <div style={{fontFamily:FD,fontWeight:700,fontSize:15,color:T.ink,marginBottom:14}}>Receivables aging</div>
+          {isEmpty
+            ?<div style={{fontSize:12,color:T.inkMuted,fontStyle:"italic"}}>Nothing outstanding.</div>
+            :<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))",gap:16}}>
+              {buckets.map(([key,label,color])=>(
+                <div key={key}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
+                    <span style={{fontSize:12,color:T.inkMuted}}>{label}</span>
+                    <span style={{fontFamily:FM,fontWeight:700,fontSize:13,color}}>{fmtMoney(aging[key])}</span>
+                  </div>
+                  <div style={{background:T.line,borderRadius:2,height:8,overflow:"hidden"}}>
+                    <div style={{width:`${Math.round(aging[key]/maxBucket*100)}%`,height:"100%",background:color,borderRadius:2}}/>
+                  </div>
+                </div>
+              ))}
+            </div>
+          }
+        </div>;
+      })()}
+
       {/* Period breakdown */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:16}}>
         {[["Today",dayM,todayStr,todayStr],["This week",weekM,startOfWeek,todayStr],["This month",monthM,startOfMonth,todayStr]].map(([label,m,from,to])=>(
@@ -3402,7 +3512,10 @@ function AccountsPanel({ledgerEntries,onAddEntry,onDeleteEntry,onEditEntry,saved
           <button key={id} onClick={()=>setView(id)} style={{padding:"8px 16px",border:"none",background:view===id?T.moss:T.paperWhite,color:view===id?T.paperWhite:T.inkMuted,cursor:"pointer",fontSize:12,fontWeight:600,fontFamily:FB}}>{label}</button>
         ))}
       </div>
-      <button onClick={()=>openEntryForm("","customer","gave")} style={{...BTN(),background:T.moss,color:T.paperWhite}}>+ Add entry</button>
+      <div style={{display:"flex",gap:8}}>
+        <button onClick={()=>openEntryForm("","other","got")} style={{...BTN(),border:`1px solid ${T.clay}`,background:"transparent",color:T.clay}}>+ Add expense</button>
+        <button onClick={()=>openEntryForm("","customer","gave")} style={{...BTN(),background:T.moss,color:T.paperWhite}}>+ Add entry</button>
+      </div>
     </div>
 
     {/* Summary cards */}
@@ -3470,13 +3583,16 @@ function AccountsPanel({ledgerEntries,onAddEntry,onDeleteEntry,onEditEntry,saved
       }
     </>}
 
-    {showAddEntry&&<Modal onClose={()=>setShowAddEntry(false)} width={420}>
-      <ModalHeader title="Add ledger entry" onClose={()=>setShowAddEntry(false)}/>
+    {showAddEntry&&(()=>{
+      const isExpense=entryForm.party_type==="other";
+      return <Modal onClose={()=>setShowAddEntry(false)} width={420}>
+      <ModalHeader title={isExpense?"Add business expense":"Add ledger entry"} onClose={()=>setShowAddEntry(false)}/>
       <div style={{padding:20}}>
         <div style={{marginBottom:12}}>
-          <label style={IL}>Party name</label>
-          <input list="party-options" value={entryForm.party_name} onChange={e=>setEntryForm(f=>({...f,party_name:e.target.value}))} placeholder="Type or select a name" style={II}/>
+          <label style={IL}>{isExpense?"Expense category":"Party name"}</label>
+          <input list={isExpense?"expense-options":"party-options"} value={entryForm.party_name} onChange={e=>setEntryForm(f=>({...f,party_name:e.target.value}))} placeholder={isExpense?"e.g. Rent, Fuel, Staff Wages":"Type or select a name"} style={II}/>
           <datalist id="party-options">{knownPartyNames.map(n=><option key={n} value={n}/>)}</datalist>
+          <datalist id="expense-options">{EXPENSE_CATEGORIES.map(n=><option key={n} value={n}/>)}</datalist>
         </div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
           <div>
@@ -3507,11 +3623,12 @@ function AccountsPanel({ledgerEntries,onAddEntry,onDeleteEntry,onEditEntry,saved
           <label style={IL}>Note (optional)</label>
           <input value={entryForm.notes} onChange={e=>setEntryForm(f=>({...f,notes:e.target.value}))} placeholder="e.g. Cash payment" style={II}/>
         </div>
-        <button onClick={submitEntry} disabled={saving||!entryForm.party_name.trim()||!entryForm.amount} style={{...BTN(),width:"100%",background:T.moss,color:T.paperWhite,padding:"12px 0"}}>
-          {saving?"Saving…":"Save entry"}
+        <button onClick={submitEntry} disabled={saving||!entryForm.party_name.trim()||!entryForm.amount} style={{...BTN(),width:"100%",background:isExpense?T.clay:T.moss,color:T.paperWhite,padding:"12px 0"}}>
+          {saving?"Saving…":isExpense?"Save expense":"Save entry"}
         </button>
       </div>
-    </Modal>}
+    </Modal>;
+    })()}
   </div>;
 }
 
@@ -4298,6 +4415,18 @@ export default function App(){
       fetchLedger();
     }
 
+    // Keep the ledger's "gave" entry in sync whenever a delivered order's
+    // items/rate are edited — otherwise Accounts silently drifts from the
+    // real bill (the app already detects that drift and shows a ⚠; this
+    // closes the loop instead of just flagging it).
+    if(!wasNewOrder&&order.status==="Delivered"){
+      await supabase.from("ledger_entries")
+        .update({amount:orderTotal(order,inventory)})
+        .eq("linked_order_id",order.id)
+        .eq("entry_type","gave");
+      fetchLedger();
+    }
+
     fetchOrders();
     setEditOrder(null);
     if(wasNewOrder)showToast("Order created — "+order.id);
@@ -4383,7 +4512,7 @@ export default function App(){
 
     {/* Body */}
     <div style={{maxWidth:1000,margin:"0 auto",padding:"20px 14px"}}>
-      {tab==="new-order"&&<OrderIntake onOrderCreated={handleOrderCreated} inventory={inventory} savedCustomers={savedCustomers} onSaveCustomer={addSavedCustomer}/> }
+      {tab==="new-order"&&<OrderIntake onOrderCreated={handleOrderCreated} inventory={inventory} savedCustomers={savedCustomers} onSaveCustomer={addSavedCustomer} ledgerEntries={ledgerEntries}/> }
       {tab==="dashboard"&&<Dashboard orders={orders} inventory={inventory} onUpdateStatus={handleUpdateStatus} onView={setViewOrder} onEdit={o=>{setEditOrder(o);}} onDelete={handleDelete} onPrint={o=>setPrintOrder(o)} onNew={()=>setEditOrder({})} userRole={user.role} onUpdateActualQty={async(orderId,items)=>{
         setOrders(prev=>prev.map(o=>o.id===orderId?{...o,items}:o));
         // Sync ledger: recalculate total with new actual weights and update the linked entry
@@ -4397,11 +4526,11 @@ export default function App(){
             .eq("entry_type","gave");
           fetchLedger();
         }
-      }} onMarkPaid={handleMarkPaid}/>}
+      }} onMarkPaid={handleMarkPaid} ledgerEntries={ledgerEntries}/>}
       {tab==="inventory"&&isAdmin&&<InventoryPanel inventory={inventory} onUpdate={setInventory} customers={allCustomerNames} user={user}/>}
       {tab==="purchases"&&isAdmin&&<Purchases inventory={inventory} onInventoryUpdate={setInventory} onPurchaseSaved={recordPurchaseLedgerEntry} savedVendors={savedVendors} onSaveVendor={addSavedVendor}/>}
       {tab==="accounts"&&isAdmin&&<AccountsPanel ledgerEntries={ledgerEntries} onAddEntry={addManualLedgerEntry} onDeleteEntry={deleteLedgerEntry} onEditEntry={editLedgerEntry} savedCustomers={savedCustomers} purchaseVendors={savedVendors.map(v=>v.name)} orders={orders} onDeleteOrder={handleDelete} inventory={inventory} onSaveCustomer={addSavedCustomer} user={user}/>}
-      {tab==="analytics"&&isAdmin&&<Analytics orders={orders} inventory={inventory}/>}
+      {tab==="analytics"&&isAdmin&&<Analytics orders={orders} inventory={inventory} ledgerEntries={ledgerEntries}/>}
       {tab==="admin"&&isAdmin&&<AdminPanel logo={logo} onLogoChange={setLogo} savedCustomers={savedCustomers} onSaveCustomer={addSavedCustomer} onDeleteCustomer={deleteSavedCustomer} orders={orders} inventory={inventory} ledgerEntries={ledgerEntries} onSyncLedger={syncLedgerEntries} onRenameCustomer={()=>{fetchOrders();fetchLedger();fetchSavedCustomers();}} user={user}/>}
     </div>
 
@@ -4453,7 +4582,7 @@ export default function App(){
     </Modal>}
 
     {/* Edit/Create order modal */}
-    {editOrder!==null&&<OrderForm initial={editOrder?.id?editOrder:null} inventory={inventory} onSave={handleOrderSaved} onClose={()=>setEditOrder(null)} savedCustomers={savedCustomers} onSaveCustomer={addSavedCustomer}/>}
+    {editOrder!==null&&<OrderForm initial={editOrder?.id?editOrder:null} inventory={inventory} onSave={handleOrderSaved} onClose={()=>setEditOrder(null)} savedCustomers={savedCustomers} onSaveCustomer={addSavedCustomer} ledgerEntries={ledgerEntries}/>}
 
     {/* Packing weight + print */}
     {printOrder&&<PackingWeightModal order={printOrder} inventory={inventory} ledgerEntries={ledgerEntries} onClose={()=>setPrintOrder(null)}/>}
