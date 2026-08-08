@@ -2152,6 +2152,19 @@ function Analytics({orders,inventory}){
 
   const monthTotal=useMemo(()=>monthOrders.reduce((s,o)=>s+orderTotal(o,inventory),0),[monthOrders,inventory]);
 
+  // Revenue per day across the selected period, so a glance shows whether
+  // the trend is climbing or falling instead of just one lump total.
+  const dailyTrend=useMemo(()=>{
+    const byDate={};
+    monthOrders.forEach(o=>{
+      const d=o.delivery_date||o.order_date||"";
+      if(!d)return;
+      byDate[d]=(byDate[d]||0)+orderTotal(o,inventory);
+    });
+    return Object.entries(byDate).sort(([a],[b])=>a<b?-1:a>b?1:0);
+  },[monthOrders,inventory]);
+  const maxDailyRevenue=useMemo(()=>Math.max(1,...dailyTrend.map(([,v])=>v)),[dailyTrend]);
+
   // Top customers this month
   const topCustomers=useMemo(()=>{
     const customerTotals={};
@@ -2353,6 +2366,24 @@ function Analytics({orders,inventory}){
         ))}
       </div>;
     })()}
+
+    {/* Revenue trend */}
+    {dailyTrend.length>1&&<div style={{background:T.paperWhite,border:`1px solid ${T.line}`,borderRadius:3,padding:18,marginBottom:24}}>
+      <div style={{fontFamily:FD,fontWeight:700,fontSize:15,marginBottom:14,color:T.ink}}>Revenue trend</div>
+      <div style={{overflowX:"auto"}}>
+        <div style={{display:"flex",alignItems:"flex-end",gap:3,height:130,minWidth:dailyTrend.length*18}}>
+          {dailyTrend.map(([date,total])=>(
+            <div key={date} title={`${date}: ${fmtMoney(total)}`} style={{flex:"1 0 14px",height:"100%",display:"flex",alignItems:"flex-end",cursor:"default"}}>
+              <div style={{width:"100%",height:`${Math.max(total/maxDailyRevenue*100,2)}%`,background:T.moss,borderRadius:"2px 2px 0 0"}}/>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:T.inkMuted,fontFamily:FM,marginTop:8}}>
+        <span>{dailyTrend[0][0]}</span>
+        <span>{dailyTrend[dailyTrend.length-1][0]}</span>
+      </div>
+    </div>}
 
     <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:20,marginBottom:24}}>
       {/* Top customers */}
