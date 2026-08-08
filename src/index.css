@@ -11,3 +11,12 @@ code {
   font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
     monospace;
 }
+
+/* iOS Safari force-zooms on focusing any input/select/textarea under 16px —
+   overrides every inline fontSize below that on phones so tapping a field
+   doesn't jerk the whole page in and out of zoom. */
+@media (max-width: 768px) {
+  input, select, textarea {
+    font-size: 16px !important;
+  }
+}

@@ -227,10 +227,11 @@ function calcAmount(item,inventory,customerName){
   const rate=getEffectiveRate(item,inventory,customerName);
   return baseQty*rate;
 }
-function orderTotal(order,inventory){
+export function orderTotal(order,inventory){
   // Use mergeItemsForDisplay so Bell Pepper Mix is calculated correctly,
   // and calcAmountDisplay so _mixed items sum Red+Yellow separately.
-  return mergeItemsForDisplay(order.items||[]).reduce((s,it)=>s+calcAmountDisplay(it,inventory,order.customer),0);
+  const raw=mergeItemsForDisplay(order.items||[]).reduce((s,it)=>s+calcAmountDisplay(it,inventory,order.customer),0);
+  return Math.round(raw); // round off to nearest rupee — no paise in cash billing
 }
 
 // ─── SHARED UI ────────────────────────────────────────────────────────────────
@@ -260,7 +261,7 @@ function ModalHeader({title,sub,onClose}){
       <div style={{fontFamily:FD,fontWeight:600,fontSize:17,color:T.ink}}>{title}</div>
       {sub&&<div style={{fontSize:12,color:T.inkMuted,fontFamily:FM,marginTop:3}}>{sub}</div>}
     </div>
-    <button onClick={onClose} style={{background:"none",border:"none",fontSize:20,cursor:"pointer",color:T.inkMuted,lineHeight:1}}>✕</button>
+    <button onClick={onClose} style={{background:"none",border:"none",fontSize:20,cursor:"pointer",color:T.inkMuted,lineHeight:1,padding:10}}>✕</button>
   </div>;
 }
 
@@ -412,7 +413,7 @@ const PRINT_STYLES = `
 
 function printBill(order,inventory,ledgerEntries=[],showNetDue=false){
   const items=mergeItemsForDisplay(order.items||[]);
-  const total=items.reduce((s,it)=>s+calcAmountDisplay(it,inventory,order.customer),0);
+  const total=orderTotal(order,inventory);
   const billNo=order.id;
   const billDate=order.delivery_date||order.order_date||today();
 
@@ -583,7 +584,8 @@ function PackingWeightModal({order,inventory,onClose,ledgerEntries}){
   return <Modal onClose={onClose} width={600}>
     <ModalHeader title="Confirm weights & rates" sub="Set actual weight & billing unit — especially for items ordered in pcs but billed by weight" onClose={onClose}/>
     <div style={{padding:22}}>
-      <div style={{border:`1px solid ${T.line}`,borderRadius:3,marginBottom:14}}>
+      <div style={{border:`1px solid ${T.line}`,borderRadius:3,marginBottom:14,overflowX:"auto"}}>
+        <div style={{minWidth:460}}>
         <div style={{display:"grid",gridTemplateColumns:"2fr 80px 100px 90px 70px",gap:6,padding:"7px 14px",background:T.paper,borderBottom:`1px solid ${T.line}`,fontSize:10,color:T.inkMuted,fontFamily:FM,textTransform:"uppercase",letterSpacing:"0.04em",fontWeight:600}}>
           <span>Item</span><span>Actual qty</span><span>Bill unit</span><span>Rate (₹)</span><span style={{textAlign:"right"}}>Amount</span>
         </div>
@@ -609,11 +611,12 @@ function PackingWeightModal({order,inventory,onClose,ledgerEntries}){
             <span style={{fontSize:12,color:T.moss,fontFamily:FM,textAlign:"right",fontWeight:700}}>{fmtMoney(amt)}</span>
           </div>;
         })}
+        </div>
       </div>
       <div style={{fontSize:11,color:T.inkMuted,marginBottom:4}}>💡 If an item was ordered in <b>pcs</b> but you weigh it before billing, change the billing unit to <b>grams</b> or <b>kg</b> and enter the actual weight. The bill will calculate correctly.</div>
       <div style={{fontSize:11,color:T.inkMuted,marginBottom:14}}>Rate field blank = uses customer's saved/catalog rate. Gold highlight = overridden for this bill only.</div>
       <div style={{textAlign:"right",fontFamily:FM,fontSize:16,fontWeight:700,color:T.moss,marginBottom:18}}>
-        Total: {fmtMoney(mergeItemsForDisplay(billingItems).reduce((s,it)=>s+calcAmountDisplay(it,inventory,order.customer),0))}
+        Total: {fmtMoney(orderTotal({...order,items:billingItems},inventory))}
       </div>
       <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14,padding:"10px 12px",background:T.paper,borderRadius:3,border:`1px solid ${T.line}`}}>
         <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:13,color:T.ink,fontWeight:500}}>
@@ -840,7 +843,7 @@ function OrderForm({initial,inventory,onSave,onClose,savedCustomers,onSaveCustom
             <input type="number" value={it.override_rate??""} onChange={e=>setItem(i,"override_rate",e.target.value)} placeholder={fmtQty(defaultRate)}
               style={{...II,flex:"1 0 80px",padding:"6px 8px",fontFamily:FM,borderColor:isOverridden?T.gold:T.line,background:isOverridden?"#FBF6E9":T.paperWhite}}/>
             <span style={{flex:"1 0 70px",textAlign:"right",fontFamily:FM,fontSize:12,color:T.moss,fontWeight:600}}>{fmtMoney(lineTotal)}</span>
-            <button onClick={()=>removeItem(i)} style={{background:"none",border:"none",cursor:"pointer",color:T.clay,fontSize:16,lineHeight:1,width:20}}>✕</button>
+            <button onClick={()=>removeItem(i)} style={{background:"none",border:"none",cursor:"pointer",color:T.clay,fontSize:16,lineHeight:1,padding:8}}>✕</button>
           </div>;
         })}
         <button onClick={addItem} style={{width:"100%",padding:"10px",background:"none",border:"none",borderTop:`1px solid ${T.line}`,cursor:"pointer",fontSize:13,color:T.moss,fontFamily:FB,fontWeight:500}}>
@@ -1067,7 +1070,7 @@ function CustomerPackingView({orders,onlyDate,inventory,onUpdateActualQty}){
 
     {sorted.length===0
       ?<div style={{textAlign:"center",padding:50,color:T.inkMuted,fontFamily:FD,fontStyle:"italic",fontSize:15}}>No pending orders.</div>
-      :<div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 20px"}}>
+      :<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(300px,1fr))",gap:"0 20px"}}>
         {sorted.map(o=>{
           const displayItems=mergeItemsForDisplay(o.items||[]);
           const bill=orderBill(o);
@@ -1690,7 +1693,7 @@ function OrderIntake({onOrderCreated,inventory,savedCustomers,onSaveCustomer}){
                 style={{...II,resize:"vertical",lineHeight:1.6,fontSize:13}}
               />
             </div>
-            {queue.length>1&&<button onClick={()=>removeQueueSlot(i)} style={{background:"none",border:"none",cursor:"pointer",color:T.clay,fontSize:18,marginTop:8}}>✕</button>}
+            {queue.length>1&&<button onClick={()=>removeQueueSlot(i)} style={{background:"none",border:"none",cursor:"pointer",color:T.clay,fontSize:18,marginTop:8,padding:8}}>✕</button>}
           </div>
         ))}
       </div>
@@ -1777,7 +1780,7 @@ function OrderIntake({onOrderCreated,inventory,savedCustomers,onSaveCustomer}){
                         {["kg","grams","pcs","pkt","bunches","boxes","crates"].map(u=><option key={u}>{u}</option>)}
                       </select>
                       <button onClick={()=>{const items=o.items.filter((_,k)=>k!==j);updateQueueOrder(i,{...o,items});}}
-                        style={{background:"none",border:"none",cursor:"pointer",color:T.clay,fontSize:15}}>✕</button>
+                        style={{background:"none",border:"none",cursor:"pointer",color:T.clay,fontSize:15,padding:8}}>✕</button>
                     </div>;
                   })}
                   <button onClick={()=>updateQueueOrder(i,{...o,items:[...(o.items||[]),{...blankItem}]})}
@@ -1898,7 +1901,7 @@ function OrderIntake({onOrderCreated,inventory,savedCustomers,onSaveCustomer}){
               <select value={it.unit} onChange={e=>setItem(i,"unit",e.target.value)} style={{...II,flex:"1 0 90px",padding:"7px 8px"}}>
                 {["kg","grams","pcs","pkt","bunches","boxes","crates"].map(u=><option key={u}>{u}</option>)}
               </select>
-              <button onClick={()=>removeItem(i)} style={{background:"none",border:"none",cursor:"pointer",color:T.clay,fontSize:18,padding:"0 4px"}}>✕</button>
+              <button onClick={()=>removeItem(i)} style={{background:"none",border:"none",cursor:"pointer",color:T.clay,fontSize:18,padding:8}}>✕</button>
             </div>;
           })}
           <button onClick={addItem} style={{width:"100%",padding:"11px",background:"none",border:"none",borderTop:`1px solid ${T.line}`,cursor:"pointer",fontSize:13,color:T.moss,fontFamily:FB,fontWeight:500}}>
@@ -2044,7 +2047,7 @@ function InventoryPanel({inventory,onUpdate,customers,user}){
             ?<div>
               <div style={{display:"flex",justifyContent:"space-between",marginBottom:12}}>
                 <div style={{fontWeight:600,fontSize:14,color:T.ink}}>{name} — customer-specific rates</div>
-                <button onClick={()=>setRateEditName(null)} style={{background:"none",border:"none",cursor:"pointer",color:T.inkMuted,fontSize:16}}>✕</button>
+                <button onClick={()=>setRateEditName(null)} style={{background:"none",border:"none",cursor:"pointer",color:T.inkMuted,fontSize:16,padding:8}}>✕</button>
               </div>
               <div style={{fontSize:12,color:T.inkMuted,marginBottom:10}}>Default rate: {fmtMoney(rate||DEFAULT_RATES[name]||0)}/{unit}. Override below for specific customers.</div>
               {Object.entries(custRates).length>0&&<div style={{marginBottom:12}}>
@@ -2053,7 +2056,7 @@ function InventoryPanel({inventory,onUpdate,customers,user}){
                     <span style={{fontSize:13,color:T.ink}}>{cust}</span>
                     <div style={{display:"flex",gap:10,alignItems:"center"}}>
                       <span style={{fontFamily:FM,fontSize:13,color:T.moss}}>{fmtMoney(r)}/{unit}</span>
-                      <button onClick={()=>removeCustomerRate(name,cust)} style={{background:"none",border:"none",cursor:"pointer",color:T.clay,fontSize:14}}>✕</button>
+                      <button onClick={()=>removeCustomerRate(name,cust)} style={{background:"none",border:"none",cursor:"pointer",color:T.clay,fontSize:14,padding:8}}>✕</button>
                     </div>
                   </div>
                 ))}
@@ -2647,7 +2650,7 @@ function Purchases({inventory,onInventoryUpdate,onPurchaseSaved,savedVendors,onS
             <span style={{flex:"1 0 80px",textAlign:"right",fontFamily:FM,fontSize:12,color:T.moss,fontWeight:600}}>
               {fmtMoney((parseFloat(it.qty)||0)*(parseFloat(it.rate)||0))}
             </span>
-            <button onClick={()=>removeItem(i)} style={{background:"none",border:"none",cursor:"pointer",color:T.clay,fontSize:16,width:24,flexShrink:0}}>✕</button>
+            <button onClick={()=>removeItem(i)} style={{background:"none",border:"none",cursor:"pointer",color:T.clay,fontSize:16,padding:8,flexShrink:0}}>✕</button>
           </div>
         ))}
         <button onClick={addItem} style={{width:"100%",padding:"10px",background:"none",border:"none",borderTop:`1px solid ${T.line}`,cursor:"pointer",fontSize:13,color:T.moss,fontFamily:FB,fontWeight:500}}>
@@ -2726,7 +2729,8 @@ function Purchases({inventory,onInventoryUpdate,onPurchaseSaved,savedVendors,onS
           <div><label style={IL}>Date</label><input type="date" value={editForm.date} onChange={e=>setEditForm(f=>({...f,date:e.target.value}))} style={II}/></div>
           <div style={{gridColumn:"1/-1"}}><label style={IL}>Notes</label><input value={editForm.notes} onChange={e=>setEditForm(f=>({...f,notes:e.target.value}))} style={II}/></div>
         </div>
-        <div style={{border:`1px solid ${T.line}`,borderRadius:3,marginBottom:14}}>
+        <div style={{border:`1px solid ${T.line}`,borderRadius:3,marginBottom:14,overflowX:"auto"}}>
+          <div style={{minWidth:420}}>
           {editForm.items.map((it,i)=>(
             <div key={i} style={{display:"grid",gridTemplateColumns:"2fr 80px 80px 80px 32px",gap:8,padding:"10px 12px",borderBottom:i<editForm.items.length-1?`1px solid ${T.line}`:"none",alignItems:"center"}}>
               <SearchSelect
@@ -2741,6 +2745,7 @@ function Purchases({inventory,onInventoryUpdate,onPurchaseSaved,savedVendors,onS
               {it.id&&<span/>}
             </div>
           ))}
+          </div>
           <button onClick={()=>setEditForm(f=>({...f,items:[...f.items,{item:DEFAULT_ITEMS[0],qty:"",unit:"kg",rate:"",_new:true}]}))}
             style={{width:"100%",padding:"9px",background:"none",border:"none",borderTop:`1px solid ${T.line}`,cursor:"pointer",fontSize:13,color:T.moss,fontWeight:600}}>
             + Add item
@@ -3934,8 +3939,21 @@ export default function App(){
   }
 
   async function fetchLedger(){
-    const{data}=await supabase.from("ledger_entries").select("*").order("date",{ascending:false}).order("created_at",{ascending:false});
-    setLedgerEntries(data||[]);
+    // PostgREST caps an unbounded select at 1000 rows — this table is already past
+    // that, and sorted oldest-last, so old rows (e.g. every "Opening Balance" entry,
+    // dated 2000-01-01) silently fall off the end. Page through until exhausted.
+    const pageSize=1000;
+    let all=[],from=0;
+    while(true){
+      const{data}=await supabase.from("ledger_entries").select("*")
+        .order("date",{ascending:false}).order("created_at",{ascending:false})
+        .range(from,from+pageSize-1);
+      if(!data?.length)break;
+      all=all.concat(data);
+      if(data.length<pageSize)break;
+      from+=pageSize;
+    }
+    setLedgerEntries(all);
   }
 
   // Auto-record: every order placed counts as a Debit (Udhar) entry for that customer
