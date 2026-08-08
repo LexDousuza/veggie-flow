@@ -8,6 +8,24 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: { persistSession: true, autoRefreshToken: true },
 });
 
+// PostgREST caps an unbounded select at 1000 rows — any table that grows past
+// that silently truncates (e.g. "Total orders" reads 1000 forever once you
+// cross it). Pages through until exhausted instead of trusting a single select.
+async function fetchAllRows(table,applyOrder){
+  const pageSize=1000;
+  let all=[],from=0;
+  while(true){
+    let query=supabase.from(table).select("*");
+    if(applyOrder)query=applyOrder(query);
+    const{data}=await query.range(from,from+pageSize-1);
+    if(!data?.length)break;
+    all=all.concat(data);
+    if(data.length<pageSize)break;
+    from+=pageSize;
+  }
+  return all;
+}
+
 // ─── COMPANY INFO ─────────────────────────────────────────────────────────────
 const COMPANY = {
   name: "Exotic Greens",
@@ -2232,7 +2250,7 @@ function Analytics({orders,inventory,ledgerEntries}){
   const periodLabel=rangeMode==="range"?`${rangeFrom} to ${rangeTo}`:selectedMonth;
 
   function fetchPurchases(){
-    return supabase.from("purchases").select("*").then(({data,error})=>setPurchases((error||!data)?[]:data));
+    return fetchAllRows("purchases").then(setPurchases);
   }
 
   useEffect(()=>{
@@ -2601,8 +2619,7 @@ function Purchases({inventory,onInventoryUpdate,onPurchaseSaved,savedVendors,onS
   const [saveVendor,setSaveVendor]=useState(false);
 
   function fetchPurchases(){
-    return supabase.from("purchases").select("*").order("date",{ascending:false}).order("created_at",{ascending:false})
-      .then(({data})=>setPurchases(data||[]));
+    return fetchAllRows("purchases",q=>q.order("date",{ascending:false}).order("created_at",{ascending:false})).then(setPurchases);
   }
 
   useEffect(()=>{
@@ -2718,8 +2735,8 @@ function Purchases({inventory,onInventoryUpdate,onPurchaseSaved,savedVendors,onS
       group_id:editingGroup.id,
     }));
     await Promise.all([...updates, inserts.length?supabase.from("purchases").insert(inserts):Promise.resolve()]);
-    const{data}=await supabase.from("purchases").select("*").order("date",{ascending:false}).order("created_at",{ascending:false});
-    setPurchases(data||[]);
+    const all=await fetchAllRows("purchases",q=>q.order("date",{ascending:false}).order("created_at",{ascending:false}));
+    setPurchases(all);
     setEditingGroup(null);
     setSaving(false);
   }
@@ -4126,20 +4143,7 @@ export default function App(){
   }
 
   async function fetchLedger(){
-    // PostgREST caps an unbounded select at 1000 rows — this table is already past
-    // that, and sorted oldest-last, so old rows (e.g. every "Opening Balance" entry,
-    // dated 2000-01-01) silently fall off the end. Page through until exhausted.
-    const pageSize=1000;
-    let all=[],from=0;
-    while(true){
-      const{data}=await supabase.from("ledger_entries").select("*")
-        .order("date",{ascending:false}).order("created_at",{ascending:false})
-        .range(from,from+pageSize-1);
-      if(!data?.length)break;
-      all=all.concat(data);
-      if(data.length<pageSize)break;
-      from+=pageSize;
-    }
+    const all=await fetchAllRows("ledger_entries",q=>q.order("date",{ascending:false}).order("created_at",{ascending:false}));
     setLedgerEntries(all);
   }
 
@@ -4229,8 +4233,8 @@ export default function App(){
   }
 
   async function fetchOrders(){
-    const{data}=await supabase.from("orders").select("*").order("created_at",{ascending:false});
-    setOrders(data||[]);
+    const all=await fetchAllRows("orders",q=>q.order("created_at",{ascending:false}));
+    setOrders(all);
   }
 
   async function fetchSavedCustomers(){
