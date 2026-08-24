@@ -1,70 +1,62 @@
-# Getting Started with Create React App
+# Veggie Flow
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+**A WhatsApp-to-dashboard order management system for a wholesale exotic-vegetable supplier.**
 
-## Available Scripts
+🟢 **Live and in production** — [veggie-flow-azure.vercel.app](https://veggie-flow-azure.vercel.app)
+Actively processing real customer orders daily since July 2026 (~1,200 orders and counting).
 
-In the project directory, you can run:
+Delivered as a freelance/consulting engagement for a wholesale exotic-vegetable business in India ("Exotic Greens").
 
-### `npm start`
+---
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+## What it does
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+Customers order produce the way they always have — by texting or sending a photo on WhatsApp. Veggie Flow turns that unstructured message into a clean, structured order in the business's dashboard automatically, with no manual re-typing.
 
-### `npm test`
+1. A customer sends a WhatsApp message (or a photo of a handwritten/typed order) to the business's number.
+2. A Twilio webhook receives it and hands it to an LLM (Groq Llama / OpenAI GPT-5), which extracts customer info, delivery date, and line items — matching each item against the business's fixed inventory list and flagging anything it isn't confident about for human review.
+3. The order lands in a live admin dashboard where staff can manage orders, inventory, and billing — and generate ready-to-print invoices, supply sheets, and packing lists in one click.
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+## Key features
 
-### `npm run build`
+- **WhatsApp order intake** — text or photo, parsed automatically into structured orders
+- **AI extraction with guardrails** — strict inventory matching, ambiguous items flagged rather than guessed
+- **Secure, unattended webhook** — Twilio HMAC signature verification and input sanitization so only genuine WhatsApp traffic can write to the database
+- **Admin dashboard** — role-based staff accounts, order and inventory management
+- **Document generation** — printable invoices, supply sheets, and packing lists
+- **Analytics** — revenue tracking, low-stock alerts, Excel export
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+## Tech stack
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+- **Frontend:** React
+- **Backend:** Vercel serverless functions, Supabase (Postgres + Auth)
+- **Integrations:** Twilio (WhatsApp), Groq (Llama 3.3/4), OpenAI (GPT-5)
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+## Security
 
-### `npm run eject`
+- All third-party API keys (Groq, OpenAI, Twilio, Supabase service role) live server-side only, read from environment variables — never bundled into client-side code
+- Twilio webhook requests are verified with HMAC-SHA1 signature checks before any data is parsed or written
+- All AI-parsed data is sanitized (length-clamped, type-checked, allow-listed) before hitting the database, since it originates from untrusted external input
+- Row-level access and admin actions (creating/deleting staff) go through Supabase's service-role API server-side, never exposed to the browser
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
+## Setup
 
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+Requires accounts with Vercel, Supabase, Twilio, and Groq/OpenAI. Copy `.env.example`-style variables below into your own `.env.local` (never commit real values):
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
+```
+REACT_APP_SUPABASE_URL=
+REACT_APP_SUPABASE_ANON_KEY=
+SUPABASE_URL=
+SUPABASE_ANON_KEY=
+SUPABASE_SERVICE_ROLE_KEY=
+GROQ_API_KEY=
+OPENAI_API_KEY=
+TWILIO_ACCOUNT_SID=
+TWILIO_AUTH_TOKEN=
+```
 
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
-
-## Learn More
-
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
-
-To learn React, check out the [React documentation](https://reactjs.org/).
-
-### Code Splitting
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
-
-### Analyzing the Bundle Size
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
-
-### Making a Progressive Web App
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
-
-### Advanced Configuration
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
-
-### Deployment
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
-
-### `npm run build` fails to minify
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+```bash
+npm install
+npm start       # local dev server
+npm run build   # production build
+```
