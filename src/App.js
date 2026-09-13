@@ -121,7 +121,11 @@ function logActivity(user,action,details){
     actor_name:user?.name||"",actor_email:user?.email||"",action,details:details||"",
   }]);
 }
-function fmtMoney(n){ return "₹"+(n||0).toLocaleString("en-IN"); }
+// Whole rupees everywhere — matches the "no paise in cash billing" convention orderTotal()
+// already rounds to. Without maximumFractionDigits, toLocaleString defaults to up to 3
+// fraction digits, so accumulated float error from qty*rate sums showed up as inconsistent,
+// meaningless decimals like ₹96,824.3 or ₹52,923.166 depending on the underlying math.
+function fmtMoney(n){ return "₹"+(n||0).toLocaleString("en-IN",{maximumFractionDigits:0}); }
 
 // A full-resolution phone photo used as a logo (several MB) gets stored as
 // base64 and re-fetched on every page load for every user — downscale to a
@@ -508,6 +512,7 @@ function printBill(order,inventory,ledgerEntries=[],showNetDue=false){
   const isCash=order.is_cash;
 
   const w=window.open("","_blank");
+  if(!w){window.alert("Couldn't open the print window — please allow pop-ups for this site and try again.");return;}
   w.document.write(`<html><head><meta charset="UTF-8"><title>Bill ${billNo} — Exotic Greens</title>
   <style>${PRINT_STYLES}</style></head><body>
     <div class="sheet">
@@ -638,6 +643,7 @@ function PackingWeightModal({order,inventory,onClose,ledgerEntries}){
     bill_unit:it.unit,
   })));
   const [showNetDue,setShowNetDue]=useState(false);
+  const [saveError,setSaveError]=useState("");
 
   function updateQty(i,val){const next=[...items];next[i]={...next[i],actual_qty:parseFloat(val)||0};setItems(next);}
   function updateRate(i,val){const next=[...items];next[i]={...next[i],override_rate:val};setItems(next);}
@@ -653,7 +659,13 @@ function PackingWeightModal({order,inventory,onClose,ledgerEntries}){
         ?parseFloat(it.override_rate)
         :getEffectiveRate(it,inventory,order.customer),
     }));
-    await supabase.from("orders").update({items:frozenItems}).eq("id",order.id);
+    const{error}=await supabase.from("orders").update({items:frozenItems}).eq("id",order.id);
+    if(error){
+      // Don't silently close as if this saved — a reprint later would show different
+      // rates than this one if the freeze never actually persisted.
+      setSaveError("Couldn't save the frozen rates for future reprints ("+error.message+") — this bill printed with today's rates, but reprinting later may show different numbers. Try again before closing.");
+      return;
+    }
     printBill({...order,items:frozenItems},inventory,ledgerEntries||[],showNetDue);
     onClose();
   }
@@ -663,6 +675,7 @@ function PackingWeightModal({order,inventory,onClose,ledgerEntries}){
   return <Modal onClose={onClose} width={600}>
     <ModalHeader title="Confirm weights & rates" sub="Set actual weight & billing unit — especially for items ordered in pcs but billed by weight" onClose={onClose}/>
     <div style={{padding:22}}>
+      {saveError&&<div style={{background:"#F3E3DC",color:T.clay,padding:"10px 14px",borderRadius:2,marginBottom:14,fontSize:13,borderLeft:`3px solid ${T.clay}`}}>{saveError}</div>}
       <div style={{border:`1px solid ${T.line}`,borderRadius:3,marginBottom:14,overflowX:"auto"}}>
         <div style={{minWidth:460}}>
         <div style={{display:"grid",gridTemplateColumns:"2fr 80px 100px 90px 70px",gap:6,padding:"7px 14px",background:T.paper,borderBottom:`1px solid ${T.line}`,fontSize:10,color:T.inkMuted,fontFamily:FM,textTransform:"uppercase",letterSpacing:"0.04em",fontWeight:600}}>
@@ -972,6 +985,16 @@ function OrderCard({order,inventory,onView,onEdit,onDelete,onUpdateStatus,onPrin
   const remaining=Math.max(0,total-paidSoFar);
   const [showRecordPayment,setShowRecordPayment]=useState(false);
   const [payAmount,setPayAmount]=useState("");
+  // Guards against a fast double-tap/double-click firing handleUpdateStatus twice before
+  // the first request lands — without this, both calls read the same pre-update status
+  // and can double-deduct inventory / double-post the delivery ledger entry.
+  const [statusSaving,setStatusSaving]=useState(false);
+  async function toggleDelivered(){
+    if(statusSaving)return;
+    setStatusSaving(true);
+    await onUpdateStatus(order.id,isDelivered?"Pending":"Delivered");
+    setStatusSaving(false);
+  }
 
   return <div style={{background:T.paperWhite,border:`1px solid ${T.line}`,borderLeft:`3px solid ${isCash?(isPaid?"#5C8A3D":T.gold):STATUS_CFG[order.status]?.dot||T.sage}`,borderRadius:3,padding:"14px 16px",fontFamily:FB}}>
     <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,gap:10,flexWrap:"wrap"}}>
@@ -1007,16 +1030,19 @@ function OrderCard({order,inventory,onView,onEdit,onDelete,onUpdateStatus,onPrin
       ))}
     </div>
     <div style={{display:"flex",gap:6,flexWrap:"wrap",borderTop:`1px solid ${T.line}`,paddingTop:11}}>
-      <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:T.ink,cursor:"pointer",padding:"7px 10px",border:`1px solid ${T.line}`,borderRadius:3,background:isDelivered?"#E1EAD6":"transparent"}}>
-        <input type="checkbox" checked={isDelivered} onChange={()=>onUpdateStatus(order.id,isDelivered?"Pending":"Delivered")} style={{margin:0}}/>
-        Delivered
+      <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:T.ink,cursor:statusSaving?"default":"pointer",padding:"7px 10px",border:`1px solid ${T.line}`,borderRadius:3,background:isDelivered?"#E1EAD6":"transparent",opacity:statusSaving?0.6:1}}>
+        <input type="checkbox" checked={isDelivered} disabled={statusSaving} onChange={toggleDelivered} style={{margin:0}}/>
+        {statusSaving?"Saving…":"Delivered"}
       </label>
       {isCash&&!isPaid&&<button onClick={()=>setShowPayModal(true)} style={{...BTN(),padding:"7px 12px",background:T.gold,color:T.paperWhite,fontSize:12,fontWeight:700}}>Mark Paid</button>}
       {!isCash&&isDelivered&&remaining>0.5&&<button onClick={()=>{setPayAmount(String(remaining));setShowRecordPayment(true);}} style={{...BTN(),padding:"7px 12px",background:T.gold,color:T.paperWhite,fontSize:12,fontWeight:700}}>Record payment</button>}
-      <button onClick={()=>onView(order)} style={{...BTN(),flex:"1 0 70px",padding:"7px 0",background:"transparent",border:`1px solid ${T.line}`,color:T.ink,fontSize:12}}>View</button>
-      <button onClick={()=>onEdit(order)} style={{...BTN(),flex:"1 0 70px",padding:"7px 0",background:"transparent",border:`1px solid ${T.line}`,color:T.ink,fontSize:12}}>Edit</button>
-      {userRole==="admin"&&<button onClick={()=>onPrint(order)} style={{...BTN(),flex:"1 0 70px",padding:"7px 0",background:"transparent",border:`1px solid ${T.line}`,color:T.inkMuted,fontSize:12}}>Print</button>}
-      {userRole==="admin"&&<button onClick={()=>onDelete(order.id)} style={{...BTN(),flex:"1 0 70px",padding:"7px 0",background:"transparent",border:`1px solid ${T.clay}`,color:T.clay,fontSize:12}}>Delete</button>}
+      {/* View/Edit/Print are secondary — no border/fill, so the two actions above (Delivered,
+          payment) stay the visually primary choices instead of six equal-weight buttons */}
+      <button onClick={()=>onView(order)} style={{...BTN(),padding:"7px 10px",background:"none",border:"none",color:T.inkMuted,fontSize:12,fontWeight:600,textDecoration:"underline",textDecorationColor:T.line}}>View</button>
+      <button onClick={()=>onEdit(order)} style={{...BTN(),padding:"7px 10px",background:"none",border:"none",color:T.inkMuted,fontSize:12,fontWeight:600,textDecoration:"underline",textDecorationColor:T.line}}>Edit</button>
+      {userRole==="admin"&&<button onClick={()=>onPrint(order)} style={{...BTN(),padding:"7px 10px",background:"none",border:"none",color:T.inkMuted,fontSize:12,fontWeight:600,textDecoration:"underline",textDecorationColor:T.line}}>Print</button>}
+      {/* Delete stays visually distinct (red outline) and separated from Print so a mis-click doesn't land here */}
+      {userRole==="admin"&&<button onClick={()=>onDelete(order.id)} style={{...BTN(),marginLeft:"auto",padding:"7px 12px",background:"transparent",border:`1px solid ${T.clay}`,color:T.clay,fontSize:12}}>Delete</button>}
     </div>
 
     {showPayModal&&<div onClick={()=>setShowPayModal(false)} style={{position:"fixed",inset:0,background:"rgba(28,30,23,0.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000}}>
@@ -1147,6 +1173,7 @@ function CustomerPackingView({orders,onlyDate,inventory,onUpdateActualQty}){
     }).join("");
 
     const w=window.open("","_blank");
+    if(!w){window.alert("Couldn't open the print window — please allow pop-ups for this site and try again.");return;}
     w.document.write(`<html><head><meta charset="UTF-8"><title>Supply Sheet ${date}</title>
     <style>
       body{font-family:Arial,sans-serif;padding:10px 12px;background:#fff;font-size:13px;}
@@ -1321,6 +1348,7 @@ function PackingListView({orders,onlyDate,onUpdateActualQty,inventory}){
 
   function printList(){
     const w=window.open("","_blank");
+    if(!w){window.alert("Couldn't open the print window — please allow pop-ups for this site and try again.");return;}
     w.document.write(`<html><head><meta charset="UTF-8"><title>Packing List</title>
     <style>body{font-family:Arial,sans-serif;padding:24px;font-size:13px;max-width:500px;margin:0 auto;}
     h2{margin-bottom:2px;} .sub{color:#666;font-size:12px;margin-bottom:16px;}
@@ -1487,14 +1515,17 @@ function Dashboard({orders,inventory,onUpdateStatus,onView,onEdit,onDelete,onPri
     }),[orders,deferredSearch,filterStatus,filterDate,sortBy]);
 
   const stats=useMemo(()=>{
+    const pendingCount=orders.filter(o=>o.status==="Pending").length;
+    const pendingDues=totalReceivable(ledgerEntries);
+    // Gold/clay mean "needs attention" everywhere else in the app — a stat card fixed to
+    // that color regardless of value made "Pending: 0" (good news) look like a warning
+    // the same as "Pending: 12". Color by whether the number is actually bad news.
     const base=[
       ["Total",orders.length,T.moss],
-      ["Pending",orders.filter(o=>o.status==="Pending").length,T.gold],
+      ["Pending",pendingCount,pendingCount>0?T.gold:"#5C8A3D"],
       ["Delivered",orders.filter(o=>o.status==="Delivered").length,"#5C8A3D"],
     ];
-    // Same source of truth Accounts uses — shown here too so pending money is
-    // visible where orders are actually managed, not only behind its own tab.
-    if(userRole==="admin")base.push(["Pending dues",fmtMoney(totalReceivable(ledgerEntries)),T.clay]);
+    if(userRole==="admin")base.push(["Pending dues",fmtMoney(pendingDues),pendingDues>0?T.clay:"#5C8A3D"]);
     return base;
   },[orders,userRole,ledgerEntries]);
 
@@ -2042,7 +2073,9 @@ function OrderIntake({onOrderCreated,inventory,savedCustomers,onSaveCustomer,led
         </div>
 
         <div style={{display:"flex",gap:10}}>
-          <button onClick={resetAll} style={{...BTN(),border:`1px solid ${T.line}`,background:"transparent",color:T.inkMuted}}>Clear</button>
+          {/* Matched height/weight with the primary CTA below so it reads as a real secondary
+              action, not a thin afterthought bolted on next to it */}
+          <button onClick={resetAll} style={{...BTN(),border:`1px solid ${T.ink}`,background:"transparent",color:T.ink,fontWeight:600,padding:"12px 22px"}}>Clear</button>
           <button onClick={confirmOrder} disabled={confirming} style={{...BTN(),flex:1,background:T.moss,color:T.paperWhite,padding:"12px 0",opacity:confirming?0.6:1}}>{confirming?"Creating…":"Create order ticket"}</button>
         </div>
       </div>
@@ -2207,14 +2240,16 @@ function InventoryPanel({inventory,onUpdate,customers,user}){
                 <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6,flexWrap:"wrap"}}>
                   <span style={{fontWeight:700,fontSize:15,color:T.ink}}>{name}</span>
                   {isLow&&<span style={{fontSize:10,color:T.clay,fontFamily:FM,textTransform:"uppercase",letterSpacing:"0.04em"}}>Low stock</span>}
-                  {Object.keys(custRates).length>0&&<span style={{fontSize:10,color:T.gold,fontFamily:FM,textTransform:"uppercase",letterSpacing:"0.04em"}}>{Object.keys(custRates).length} custom rate{Object.keys(custRates).length>1?"s":""}</span>}
+                  {/* Neutral metadata, not a warning — gold is reserved for things that need attention (low stock, overdue) */}
+                  {Object.keys(custRates).length>0&&<span style={{fontSize:10,color:T.inkMuted,fontFamily:FM,textTransform:"uppercase",letterSpacing:"0.04em"}}>{Object.keys(custRates).length} custom rate{Object.keys(custRates).length>1?"s":""}</span>}
                 </div>
                 <div style={{background:T.line,borderRadius:2,height:5,overflow:"hidden",width:"100%",maxWidth:300}}>
-                  <div style={{width:`${Math.min(100,Math.round(qty/200*100))}%`,height:"100%",background:isLow?T.clay:qty>60?T.moss:T.gold,borderRadius:2}}/>
+                  <div style={{width:`${Math.max(0,Math.min(100,Math.round(qty/200*100)))}%`,height:"100%",background:isLow?T.clay:qty>60?T.moss:T.gold,borderRadius:2}}/>
                 </div>
               </div>
               <div style={{display:"flex",gap:14,fontSize:12,color:T.inkMuted,fontFamily:FM,textAlign:"right"}}>
-                <span>{fmtQty(qty)} {unit}</span>
+                {/* A raw negative reads as a data error, not "oversold" — spell out what it means */}
+                <span style={qty<0?{color:T.clay,fontWeight:700}:undefined}>{qty<0?`Oversold by ${fmtQty(Math.abs(qty))}`:fmtQty(qty)} {unit}</span>
                 <span>{fmtMoney(rate||DEFAULT_RATES[name]||0)}/{unit}</span>
               </div>
               <div style={{display:"flex",gap:6}}>
@@ -2239,6 +2274,7 @@ function Analytics({orders,inventory,ledgerEntries}){
   const [rangeMode,setRangeMode]=useState("month"); // month | range
   const [rangeFrom,setRangeFrom]=useState(today().slice(0,8)+"01");
   const [rangeTo,setRangeTo]=useState(today());
+  const [hoverBar,setHoverBar]=useState(null); // which Revenue trend bar's amount is showing
 
   // Drives every "monthly" computation below — either the whole selected
   // month, or an arbitrary from/to range (ISO date strings compare correctly
@@ -2285,11 +2321,22 @@ function Analytics({orders,inventory,ledgerEntries}){
     .filter(e=>e.party_type==="other"&&e.entry_type==="got"&&inSelectedPeriod(e.date||""))
     .reduce((s,e)=>s+e.amount,0),[ledgerEntries,rangeMode,selectedMonth,rangeFrom,rangeTo]);
 
+  // Same date field every other figure on this page uses (delivery date first,
+  // falling back to order date) — this used to key off order_date alone, so an
+  // order placed at month-end but delivered early next month could show up in
+  // "Top customers" for one month and the printed statement for a different one.
   const customerOrders=useMemo(()=>selectedCustomer
-    ?orders.filter(o=>o.customer===selectedCustomer&&inSelectedPeriod(o.order_date||""))
+    ?orders.filter(o=>o.customer===selectedCustomer&&inSelectedPeriod(o.delivery_date||o.order_date||""))
     :[],[orders,selectedCustomer,rangeMode,selectedMonth,rangeFrom,rangeTo]);
 
-  const monthTotal=useMemo(()=>monthOrders.reduce((s,o)=>s+orderTotal(o,inventory),0),[monthOrders,inventory]);
+  // "Revenue" for Net profit must be REALIZED revenue, not every order placed in the
+  // period — the rest of the app only books a ledger "gave" entry once an order is
+  // marked Delivered (see handleOrderSaved's comment: "recorded on delivery"). Counting
+  // still-Pending orders here would pair speculative revenue against real, already-paid
+  // purchase/expense costs and could show a healthy profit built on orders that haven't
+  // shipped yet — or never will.
+  const deliveredMonthOrders=useMemo(()=>monthOrders.filter(o=>o.status==="Delivered"),[monthOrders]);
+  const monthTotal=useMemo(()=>deliveredMonthOrders.reduce((s,o)=>s+orderTotal(o,inventory),0),[deliveredMonthOrders,inventory]);
 
   // Revenue per day across the selected period, so a glance shows whether
   // the trend is climbing or falling instead of just one lump total.
@@ -2329,6 +2376,7 @@ function Analytics({orders,inventory,ledgerEntries}){
     const co=customerOrders;
     const total=co.reduce((s,o)=>s+orderTotal(o,inventory),0);
     const w=window.open("","_blank");
+    if(!w){window.alert("Couldn't open the print window — please allow pop-ups for this site and try again.");return;}
     w.document.write(`<html><head><meta charset="UTF-8"><title>Statement ${periodLabel} — ${selectedCustomer}</title>
     <style>${PRINT_STYLES}</style></head><body>
       <div class="sheet">
@@ -2387,7 +2435,7 @@ function Analytics({orders,inventory,ledgerEntries}){
 
     {/* ── DAILY REPORT ── */}
     {(()=>{
-      const dayOrders=orders.filter(o=>(o.delivery_date||o.order_date||"")===selectedDay&&o.status!=="");
+      const dayOrders=orders.filter(o=>(o.delivery_date||o.order_date||"")===selectedDay);
       const dayRevenue=dayOrders.reduce((s,o)=>s+orderTotal(o,inventory),0);
       const dayCustomers=[...new Set(dayOrders.map(o=>o.customer).filter(Boolean))];
       const deliveredDay=dayOrders.filter(o=>o.status==="Delivered");
@@ -2490,7 +2538,7 @@ function Analytics({orders,inventory,ledgerEntries}){
       const profit=monthTotal-monthPurchaseCost-monthExpenses;
       const profitColor=profit>=0?"#2D6A4F":"#8A3A2D";
       const statCards=[
-        ["Total revenue",fmtMoney(monthTotal),T.moss],
+        ["Delivered revenue",fmtMoney(monthTotal),T.moss],
         ["Purchase cost",fmtMoney(monthPurchaseCost),T.clay],
         ["Other expenses",fmtMoney(monthExpenses),T.clay],
         ["Net profit",fmtMoney(profit),profitColor],
@@ -2513,8 +2561,20 @@ function Analytics({orders,inventory,ledgerEntries}){
       <div style={{overflowX:"auto"}}>
         <div style={{display:"flex",alignItems:"flex-end",gap:3,height:130,minWidth:dailyTrend.length*18}}>
           {dailyTrend.map(([date,total])=>(
-            <div key={date} title={`${date}: ${fmtMoney(total)}`} style={{flex:"1 0 14px",height:"100%",display:"flex",alignItems:"flex-end",cursor:"default"}}>
-              <div style={{width:"100%",height:`${Math.max(total/maxDailyRevenue*100,2)}%`,background:T.moss,borderRadius:"2px 2px 0 0"}}/>
+            // The native `title` tooltip this used to rely on has a ~1s hover delay in most
+            // browsers and doesn't fire at all on touch (tablets, which this app runs on) —
+            // so it looked like hovering just did nothing. This shows the amount as a real
+            // on-screen label instead, toggled by tap as well as hover.
+            <div key={date}
+              onMouseEnter={()=>setHoverBar(date)}
+              onMouseLeave={()=>setHoverBar(h=>h===date?null:h)}
+              onClick={()=>setHoverBar(h=>h===date?null:date)}
+              style={{flex:"1 0 14px",height:"100%",display:"flex",alignItems:"flex-end",cursor:"pointer",position:"relative"}}>
+              <div style={{width:"100%",height:`${Math.max(total/maxDailyRevenue*100,2)}%`,background:T.moss,borderRadius:"2px 2px 0 0",position:"relative"}}>
+                {hoverBar===date&&<div style={{position:"absolute",bottom:"100%",left:"50%",transform:"translateX(-50%)",marginBottom:5,background:T.ink,color:T.paperWhite,fontSize:11,fontFamily:FM,fontWeight:600,padding:"4px 8px",borderRadius:2,whiteSpace:"nowrap",zIndex:10,pointerEvents:"none"}}>
+                  {fmtMoney(total)}<span style={{opacity:0.65,marginLeft:6,fontWeight:400}}>{date}</span>
+                </div>}
+              </div>
             </div>
           ))}
         </div>
@@ -3082,6 +3142,7 @@ function AccountsPanel({ledgerEntries,onAddEntry,onDeleteEntry,onEditEntry,saved
       });
       const closing=rows.length?rows[rows.length-1].running:periodOpeningBalance;
       const w=window.open("","_blank");
+      if(!w){window.alert("Couldn't open the print window — please allow pop-ups for this site and try again.");return;}
       w.document.write(`<html><head><meta charset="UTF-8"><title>Statement — ${p.name}</title>
       <style>${PRINT_STYLES}</style></head><body>
         <div class="sheet">
@@ -3149,6 +3210,7 @@ function AccountsPanel({ledgerEntries,onAddEntry,onDeleteEntry,onEditEntry,saved
       });
       const closing=rows.length?rows[rows.length-1].running:periodOpeningBalance;
       const w=window.open("","_blank");
+      if(!w){window.alert("Couldn't open the print window — please allow pop-ups for this site and try again.");return;}
       w.document.write(`<html><head><meta charset="UTF-8"><title>Detailed Statement — ${p.name}</title>
       <style>${PRINT_STYLES}
         .detail-row{background:#F8F6F0;border-left:3px solid #E1DACA;padding:6px 10px;margin-top:2px;font-size:11px;}
@@ -3653,7 +3715,15 @@ function AccountsPanel({ledgerEntries,onAddEntry,onDeleteEntry,onEditEntry,saved
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
           <div>
             <label style={IL}>Type</label>
-            <select value={entryForm.party_type} onChange={e=>setEntryForm(f=>({...f,party_type:e.target.value}))} style={II}>
+            <select value={entryForm.party_type} onChange={e=>{
+              const party_type=e.target.value;
+              // "Other" always means a business expense (Analytics' Other-expenses total
+              // only counts entry_type "got" for party_type "other" — leaving entry_type
+              // on its previous value here used to let an expense get silently logged as
+              // "gave" and disappear from Net profit). Force it to "got" here the same way
+              // the dedicated "+ Add expense" button already does.
+              setEntryForm(f=>({...f,party_type,entry_type:party_type==="other"?"got":f.entry_type}));
+            }} style={II}>
               <option value="customer">Customer</option>
               <option value="supplier">Supplier</option>
               <option value="other">Other</option>
@@ -3661,10 +3731,13 @@ function AccountsPanel({ledgerEntries,onAddEntry,onDeleteEntry,onEditEntry,saved
           </div>
           <div>
             <label style={IL}>Entry</label>
-            <select value={entryForm.entry_type} onChange={e=>setEntryForm(f=>({...f,entry_type:e.target.value}))} style={II}>
-              <option value="gave">Sale / charge (they owe you more)</option>
-              <option value="got">Payment / credit (reduces balance)</option>
-            </select>
+            {isExpense
+              ?<div style={{...II,display:"flex",alignItems:"center",color:T.inkMuted,background:T.paper}}>Expense (money out)</div>
+              :<select value={entryForm.entry_type} onChange={e=>setEntryForm(f=>({...f,entry_type:e.target.value}))} style={II}>
+                <option value="gave">Sale / charge (they owe you more)</option>
+                <option value="got">Payment / credit (reduces balance)</option>
+              </select>
+            }
           </div>
         </div>
         <div style={{marginBottom:12}}>
@@ -4418,12 +4491,17 @@ export default function App(){
 
   async function handleOrderSaved(order){
     const wasNewOrder=!editOrder?.id;
+    // Tracks whether every ledger step below actually succeeded — a failed step used to
+    // be swallowed silently, so the modal would close and say "Order updated" while
+    // accounts quietly drifted out of sync with the real bill.
+    let ledgerOk=true;
 
     // If editing and customer name changed, update linked ledger entries too
     if(!wasNewOrder&&editOrder?.customer&&editOrder.customer!==order.customer){
-      await supabase.from("ledger_entries")
+      const{error}=await supabase.from("ledger_entries")
         .update({party_name:order.customer})
         .eq("linked_order_id",order.id);
+      if(error)ledgerOk=false;
     }
 
     // If editing and is_cash changed, fix ledger entries for delivered orders
@@ -4434,45 +4512,51 @@ export default function App(){
 
       if(wasCash&&!nowCash){
         // Was cash → now regular: remove the auto-credit "Cash payment" entry
-        await supabase.from("ledger_entries")
+        const{error}=await supabase.from("ledger_entries")
           .delete()
           .eq("linked_order_id",order.id)
           .eq("entry_type","got");
-        showToast("Switched to regular — balance now outstanding in accounts");
+        if(error){ledgerOk=false;}
+        else showToast("Switched to regular — balance now outstanding in accounts");
       } else if(!wasCash&&nowCash){
         // Before adding auto-credit, check if unlinked manual credits exist for this customer.
         // If they do, adding a full auto-credit would double-count any partial payments already recorded.
-        const{data:existingCredits}=await supabase.from("ledger_entries")
+        const{data:existingCredits,error:lookupErr}=await supabase.from("ledger_entries")
           .select("id,amount,notes")
           .eq("party_name",order.customer)
           .eq("entry_type","got")
           .is("linked_order_id",null)
           .is("linked_purchase_id",null);
 
-        const manualCreditTotal=(existingCredits||[]).reduce((s,e)=>s+e.amount,0);
+        if(lookupErr){
+          ledgerOk=false;
+        } else {
+          const manualCreditTotal=(existingCredits||[]).reduce((s,e)=>s+e.amount,0);
 
-        if(manualCreditTotal>0){
-          const proceed=window.confirm(
-            `⚠ Warning: ${order.customer} already has ₹${manualCreditTotal.toLocaleString("en-IN")} in manually recorded payments in accounts.\n\nSwitching to cash will add another ₹${total.toLocaleString("en-IN")} auto-credit — this may cause double-counting.\n\nProceed anyway?`
-          );
-          if(!proceed){
-            // Abort — revert the is_cash field on the order since we're not fixing ledger
-            await supabase.from("orders").update({is_cash:false}).eq("id",order.id);
-            fetchOrders();
-            setEditOrder(null);
-            showToast("Cancelled — order kept as regular","error");
-            fetchLedger();
-            return;
+          if(manualCreditTotal>0){
+            const proceed=window.confirm(
+              `⚠ Warning: ${order.customer} already has ₹${manualCreditTotal.toLocaleString("en-IN")} in manually recorded payments in accounts.\n\nSwitching to cash will add another ₹${total.toLocaleString("en-IN")} auto-credit — this may cause double-counting.\n\nProceed anyway?`
+            );
+            if(!proceed){
+              // Abort — revert the is_cash field on the order since we're not fixing ledger
+              const{error:revertErr}=await supabase.from("orders").update({is_cash:false}).eq("id",order.id);
+              fetchOrders();
+              setEditOrder(null);
+              showToast(revertErr?"Couldn't revert cash flag — please check this order in Accounts":"Cancelled — order kept as regular","error");
+              fetchLedger();
+              return;
+            }
           }
-        }
 
-        // Safe to insert auto-credit
-        await supabase.from("ledger_entries").insert([{
-          party_name:order.customer,party_type:"customer",entry_type:"got",
-          amount:total,date:order.order_date||today(),
-          notes:`Cash payment — Order ${order.id}`,linked_order_id:order.id,
-        }]);
-        showToast("Switched to cash — balance cleared in accounts");
+          // Safe to insert auto-credit
+          const{error:insertErr}=await supabase.from("ledger_entries").insert([{
+            party_name:order.customer,party_type:"customer",entry_type:"got",
+            amount:total,date:order.order_date||today(),
+            notes:`Cash payment — Order ${order.id}`,linked_order_id:order.id,
+          }]);
+          if(insertErr)ledgerOk=false;
+          else showToast("Switched to cash — balance cleared in accounts");
+        }
       }
       fetchLedger();
     }
@@ -4482,16 +4566,18 @@ export default function App(){
     // real bill (the app already detects that drift and shows a ⚠; this
     // closes the loop instead of just flagging it).
     if(!wasNewOrder&&order.status==="Delivered"){
-      await supabase.from("ledger_entries")
+      const{error}=await supabase.from("ledger_entries")
         .update({amount:orderTotal(order,inventory)})
         .eq("linked_order_id",order.id)
         .eq("entry_type","gave");
+      if(error)ledgerOk=false;
       fetchLedger();
     }
 
     fetchOrders();
     setEditOrder(null);
-    if(wasNewOrder)showToast("Order created — "+order.id);
+    if(!ledgerOk)showToast("Order saved, but an accounts update failed — please check Accounts for "+order.customer,"error");
+    else if(wasNewOrder)showToast("Order created — "+order.id);
     else if(editOrder?.is_cash===order.is_cash)showToast("Order updated");
     learnCustomerRates(order);
     // No ledger entry here — only recorded on delivery
